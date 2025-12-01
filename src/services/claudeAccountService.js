@@ -3128,6 +3128,29 @@ class ClaudeAccountService {
       result.account_uuid = extInfo.account_uuid
     }
 
+    if (extInfo.upstream_type && typeof extInfo.upstream_type === 'string') {
+      const upstreamType = extInfo.upstream_type.trim()
+      if (upstreamType === 'relay' || upstreamType === 'official') {
+        result.upstream_type = upstreamType
+      }
+    }
+
+    if (extInfo.relay_base_url && typeof extInfo.relay_base_url === 'string') {
+      const relayBaseUrl = extInfo.relay_base_url.trim()
+      if (relayBaseUrl) {
+        try {
+          // 校验 URL 格式
+          const parsed = new URL(relayBaseUrl)
+          const normalizedUrl = parsed.toString()
+          result.relay_base_url = normalizedUrl.endsWith('/')
+            ? normalizedUrl.slice(0, -1)
+            : normalizedUrl
+        } catch (error) {
+          logger.warn('⚠️ 解析中转上游地址失败，已忽略：', relayBaseUrl, error.message)
+        }
+      }
+    }
+
     return Object.keys(result).length > 0 ? result : null
   }
 

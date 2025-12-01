@@ -1162,7 +1162,9 @@ router.post('/api-keys', authenticateAdmin, async (req, res) => {
       activationDays, // 新增：激活后有效天数
       activationUnit, // 新增：激活时间单位 (hours/days)
       expirationMode, // 新增：过期模式
-      icon // 新增：图标
+      icon, // 新增：图标
+      billingMode,
+      perRequestCost
     } = req.body
 
     // 输入验证
@@ -1295,6 +1297,26 @@ router.post('/api-keys', authenticateAdmin, async (req, res) => {
       })
     }
 
+    if (
+      billingMode !== undefined &&
+      billingMode !== null &&
+      billingMode !== '' &&
+      !['token', 'request'].includes(billingMode)
+    ) {
+      return res
+        .status(400)
+        .json({ error: 'Billing mode must be either "token" or "request"' })
+    }
+
+    if (
+      perRequestCost !== undefined &&
+      perRequestCost !== null &&
+      perRequestCost !== '' &&
+      (Number.isNaN(Number(perRequestCost)) || Number(perRequestCost) < 0)
+    ) {
+      return res.status(400).json({ error: 'Per request cost must be a non-negative number' })
+    }
+
     const newKey = await apiKeyService.generateApiKey({
       name,
       description,
@@ -1322,7 +1344,9 @@ router.post('/api-keys', authenticateAdmin, async (req, res) => {
       activationDays,
       activationUnit,
       expirationMode,
-      icon
+      icon,
+      billingMode,
+      perRequestCost
     })
 
     logger.success(`🔑 Admin created new API key: ${name}`)
@@ -1364,7 +1388,9 @@ router.post('/api-keys/batch', authenticateAdmin, async (req, res) => {
       activationDays,
       activationUnit,
       expirationMode,
-      icon
+      icon,
+      billingMode,
+      perRequestCost
     } = req.body
 
     // 输入验证
@@ -1427,7 +1453,9 @@ router.post('/api-keys/batch', authenticateAdmin, async (req, res) => {
           activationDays,
           activationUnit,
           expirationMode,
-          icon
+          icon,
+          billingMode,
+          perRequestCost
         })
 
         // 保留原始 API Key 供返回
@@ -1687,7 +1715,9 @@ router.put('/api-keys/:keyId', authenticateAdmin, async (req, res) => {
       totalCostLimit,
       weeklyOpusCostLimit,
       tags,
-      ownerId // 新增：所有者ID字段
+      ownerId, // 新增：所有者ID字段
+      billingMode,
+      perRequestCost
     } = req.body
 
     // 只允许更新指定字段
@@ -1781,6 +1811,21 @@ router.put('/api-keys/:keyId', authenticateAdmin, async (req, res) => {
         })
       }
       updates.permissions = permissions
+    }
+
+    if (billingMode !== undefined) {
+      if (!['token', 'request'].includes(billingMode)) {
+        return res.status(400).json({ error: 'Billing mode must be either "token" or "request"' })
+      }
+      updates.billingMode = billingMode
+    }
+
+    if (perRequestCost !== undefined && perRequestCost !== null && perRequestCost !== '') {
+      const cost = Number(perRequestCost)
+      if (isNaN(cost) || cost < 0) {
+        return res.status(400).json({ error: 'Per request cost must be a non-negative number' })
+      }
+      updates.perRequestCost = cost
     }
 
     // 处理模型限制字段

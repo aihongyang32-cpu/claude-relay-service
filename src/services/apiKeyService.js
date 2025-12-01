@@ -106,8 +106,17 @@ class ApiKeyService {
       activationDays = 0, // 新增：激活后有效天数（0表示不使用此功能）
       activationUnit = 'days', // 新增：激活时间单位 'hours' 或 'days'
       expirationMode = 'fixed', // 新增：过期模式 'fixed'(固定时间) 或 'activation'(首次使用后激活)
-      icon = '' // 新增：图标（base64编码）
+      icon = '', // 新增：图标（base64编码）
+      billingMode = 'token', // 新增：计费模式（token/request）
+      perRequestCost = 1 // 新增：按次计费单价
     } = options
+
+    const normalizedBillingMode = billingMode === 'request' ? 'request' : 'token'
+    const normalizedPerRequestCost = Number.isFinite(Number(perRequestCost))
+      ? Math.max(0, Number(perRequestCost))
+      : normalizedBillingMode === 'request'
+        ? 1
+        : 0
 
     // 生成简单的API Key (64字符十六进制)
     const apiKey = `${this.prefix}${this._generateSecretKey()}`
@@ -152,7 +161,9 @@ class ApiKeyService {
       createdBy: options.createdBy || 'admin',
       userId: options.userId || '',
       userUsername: options.userUsername || '',
-      icon: icon || '' // 新增：图标（base64编码）
+      icon: icon || '', // 新增：图标（base64编码）
+      billingMode: normalizedBillingMode,
+      perRequestCost: normalizedPerRequestCost.toString()
     }
 
     // 保存API Key数据并建立哈希映射
@@ -198,6 +209,8 @@ class ApiKeyService {
       activationDays: parseInt(keyData.activationDays || 0),
       activationUnit: keyData.activationUnit || 'days',
       expirationMode: keyData.expirationMode || 'fixed',
+      billingMode: normalizedBillingMode,
+      perRequestCost: normalizedPerRequestCost,
       isActivated: keyData.isActivated === 'true',
       activatedAt: keyData.activatedAt,
       createdAt: keyData.createdAt,
@@ -351,6 +364,8 @@ class ApiKeyService {
           dailyCostLimit: parseFloat(keyData.dailyCostLimit || 0),
           totalCostLimit: parseFloat(keyData.totalCostLimit || 0),
           weeklyOpusCostLimit: parseFloat(keyData.weeklyOpusCostLimit || 0),
+          billingMode: keyData.billingMode || 'token',
+          perRequestCost: parseFloat(keyData.perRequestCost || 0),
           dailyCost: dailyCost || 0,
           totalCost,
           weeklyOpusCost: (await redis.getWeeklyOpusCost(keyData.id)) || 0,
@@ -480,6 +495,8 @@ class ApiKeyService {
           dailyCostLimit: parseFloat(keyData.dailyCostLimit || 0),
           totalCostLimit: parseFloat(keyData.totalCostLimit || 0),
           weeklyOpusCostLimit: parseFloat(keyData.weeklyOpusCostLimit || 0),
+          billingMode: keyData.billingMode || 'token',
+          perRequestCost: parseFloat(keyData.perRequestCost || 0),
           dailyCost: dailyCost || 0,
           totalCost: costStats?.total || 0,
           weeklyOpusCost: (await redis.getWeeklyOpusCost(keyData.id)) || 0,
@@ -521,6 +538,8 @@ class ApiKeyService {
         key.rateLimitWindow = parseInt(key.rateLimitWindow || 0)
         key.rateLimitRequests = parseInt(key.rateLimitRequests || 0)
         key.rateLimitCost = parseFloat(key.rateLimitCost || 0) // 新增：速率限制费用字段
+        key.billingMode = key.billingMode || 'token'
+        key.perRequestCost = parseFloat(key.perRequestCost || 0)
         key.currentConcurrency = await redis.getConcurrency(key.id)
         key.isActive = key.isActive === 'true'
         key.enableModelRestriction = key.enableModelRestriction === 'true'
@@ -697,6 +716,8 @@ class ApiKeyService {
         'totalCostLimit',
         'weeklyOpusCostLimit',
         'tags',
+        'billingMode',
+        'perRequestCost',
         'userId', // 新增：用户ID（所有者变更）
         'userUsername', // 新增：用户名（所有者变更）
         'createdBy' // 新增：创建者（所有者变更）
@@ -932,109 +953,14 @@ class ApiKeyService {
     model = 'unknown',
     accountId = null
   ) {
-    try {
-      const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
-
-      // 计算费用
-      const CostCalculator = require('../utils/costCalculator')
-      const costInfo = CostCalculator.calculateCost(
-        {
-          input_tokens: inputTokens,
-          output_tokens: outputTokens,
-          cache_creation_input_tokens: cacheCreateTokens,
-          cache_read_input_tokens: cacheReadTokens
-        },
-        model
-      )
-
-      // 检查是否为 1M 上下文请求
-      let isLongContextRequest = false
-      if (model && model.includes('[1m]')) {
-        const totalInputTokens = inputTokens + cacheCreateTokens + cacheReadTokens
-        isLongContextRequest = totalInputTokens > 200000
-      }
-
-      // 记录API Key级别的使用统计
-      await redis.incrementTokenUsage(
-        keyId,
-        totalTokens,
-        inputTokens,
-        outputTokens,
-        cacheCreateTokens,
-        cacheReadTokens,
-        model,
-        0, // ephemeral5mTokens - 暂时为0，后续处理
-        0, // ephemeral1hTokens - 暂时为0，后续处理
-        isLongContextRequest
-      )
-
-      // 记录费用统计
-      if (costInfo.costs.total > 0) {
-        await redis.incrementDailyCost(keyId, costInfo.costs.total)
-        logger.database(
-          `💰 Recorded cost for ${keyId}: $${costInfo.costs.total.toFixed(6)}, model: ${model}`
-        )
-      } else {
-        logger.debug(`💰 No cost recorded for ${keyId} - zero cost for model: ${model}`)
-      }
-
-      // 获取API Key数据以确定关联的账户
-      const keyData = await redis.getApiKey(keyId)
-      if (keyData && Object.keys(keyData).length > 0) {
-        // 更新最后使用时间
-        keyData.lastUsedAt = new Date().toISOString()
-        await redis.setApiKey(keyId, keyData)
-
-        // 记录账户级别的使用统计（只统计实际处理请求的账户）
-        if (accountId) {
-          await redis.incrementAccountUsage(
-            accountId,
-            totalTokens,
-            inputTokens,
-            outputTokens,
-            cacheCreateTokens,
-            cacheReadTokens,
-            model,
-            isLongContextRequest
-          )
-          logger.database(
-            `📊 Recorded account usage: ${accountId} - ${totalTokens} tokens (API Key: ${keyId})`
-          )
-        } else {
-          logger.debug(
-            '⚠️ No accountId provided for usage recording, skipping account-level statistics'
-          )
-        }
-      }
-
-      // 记录单次请求的使用详情
-      const usageCost = costInfo && costInfo.costs ? costInfo.costs.total || 0 : 0
-      await redis.addUsageRecord(keyId, {
-        timestamp: new Date().toISOString(),
-        model,
-        accountId: accountId || null,
-        inputTokens,
-        outputTokens,
-        cacheCreateTokens,
-        cacheReadTokens,
-        totalTokens,
-        cost: Number(usageCost.toFixed(6)),
-        costBreakdown: costInfo && costInfo.costs ? costInfo.costs : undefined
-      })
-
-      const logParts = [`Model: ${model}`, `Input: ${inputTokens}`, `Output: ${outputTokens}`]
-      if (cacheCreateTokens > 0) {
-        logParts.push(`Cache Create: ${cacheCreateTokens}`)
-      }
-      if (cacheReadTokens > 0) {
-        logParts.push(`Cache Read: ${cacheReadTokens}`)
-      }
-      logParts.push(`Total: ${totalTokens} tokens`)
-
-      logger.database(`📊 Recorded usage: ${keyId} - ${logParts.join(', ')}`)
-    } catch (error) {
-      logger.error('❌ Failed to record usage:', error)
+    const usageObject = {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_creation_input_tokens: cacheCreateTokens,
+      cache_read_input_tokens: cacheReadTokens
     }
+
+    return this.recordUsageWithDetails(keyId, usageObject, model, accountId, null)
   }
 
   // 📊 记录 Opus 模型费用（仅限 claude 和 claude-console 账户）
@@ -1075,6 +1001,10 @@ class ApiKeyService {
     accountType = null
   ) {
     try {
+      const apiKeyData = await redis.getApiKey(keyId)
+      const billingMode = apiKeyData?.billingMode === 'request' ? 'request' : 'token'
+      const perRequestCost = Number.parseFloat(apiKeyData?.perRequestCost) || 0
+
       // 提取 token 数量
       const inputTokens = usageObject.input_tokens || 0
       const outputTokens = usageObject.output_tokens || 0
@@ -1084,54 +1014,120 @@ class ApiKeyService {
       const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
 
       // 计算费用（支持详细的缓存类型）- 添加错误处理
-      let costInfo = { totalCost: 0, ephemeral5mCost: 0, ephemeral1hCost: 0 }
-      try {
-        const pricingService = require('./pricingService')
-        // 确保 pricingService 已初始化
-        if (!pricingService.pricingData) {
-          logger.warn('⚠️ PricingService not initialized, initializing now...')
-          await pricingService.initialize()
-        }
-        costInfo = pricingService.calculateCost(usageObject, model)
+      let costInfo = { totalCost: 0, ephemeral5mCost: 0, ephemeral1hCost: 0, billingMode }
 
-        // 验证计算结果
-        if (!costInfo || typeof costInfo.totalCost !== 'number') {
-          logger.error(`❌ Invalid cost calculation result for model ${model}:`, costInfo)
-          // 使用 CostCalculator 作为后备
-          const CostCalculator = require('../utils/costCalculator')
-          const fallbackCost = CostCalculator.calculateCost(usageObject, model)
-          if (fallbackCost && fallbackCost.costs && fallbackCost.costs.total > 0) {
-            logger.warn(
-              `⚠️ Using fallback cost calculation for ${model}: $${fallbackCost.costs.total}`
-            )
-            costInfo = {
-              totalCost: fallbackCost.costs.total,
-              ephemeral5mCost: 0,
-              ephemeral1hCost: 0
+      if (billingMode === 'request') {
+        const requestCost = perRequestCost > 0 ? perRequestCost : 0
+        costInfo = {
+          ...costInfo,
+          totalCost: requestCost,
+          inputCost: 0,
+          outputCost: 0,
+          cacheCreateCost: 0,
+          cacheReadCost: 0,
+          costs: {
+            input: 0,
+            output: 0,
+            cacheCreate: 0,
+            cacheWrite: 0,
+            cacheRead: 0,
+            total: requestCost,
+            ephemeral5m: 0,
+            ephemeral1h: 0
+          },
+          isLongContextRequest: false
+        }
+      } else {
+        try {
+          const pricingService = require('./pricingService')
+          // 确保 pricingService 已初始化
+          if (!pricingService.pricingData) {
+            logger.warn('⚠️ PricingService not initialized, initializing now...')
+            await pricingService.initialize()
+          }
+          costInfo = pricingService.calculateCost(usageObject, model)
+
+          // 验证计算结果
+          if (!costInfo || typeof costInfo.totalCost !== 'number') {
+            logger.error(`❌ Invalid cost calculation result for model ${model}:`, costInfo)
+            // 使用 CostCalculator 作为后备
+            const CostCalculator = require('../utils/costCalculator')
+            const fallbackCost = CostCalculator.calculateCost(usageObject, model)
+            if (fallbackCost && fallbackCost.costs && fallbackCost.costs.total > 0) {
+              logger.warn(
+                `⚠️ Using fallback cost calculation for ${model}: $${fallbackCost.costs.total}`
+              )
+              costInfo = {
+                totalCost: fallbackCost.costs.total,
+                inputCost: fallbackCost.costs.input,
+                outputCost: fallbackCost.costs.output,
+                cacheCreateCost: fallbackCost.costs.cacheWrite,
+                cacheReadCost: fallbackCost.costs.cacheRead,
+                ephemeral5mCost: 0,
+                ephemeral1hCost: 0,
+                costs: fallbackCost.costs
+              }
+            } else {
+              costInfo = { totalCost: 0, ephemeral5mCost: 0, ephemeral1hCost: 0, costs: {} }
             }
-          } else {
-            costInfo = { totalCost: 0, ephemeral5mCost: 0, ephemeral1hCost: 0 }
+          }
+        } catch (pricingError) {
+          logger.error(`❌ Failed to calculate cost for model ${model}:`, pricingError)
+          logger.error(`   Usage object:`, JSON.stringify(usageObject))
+          // 使用 CostCalculator 作为后备
+          try {
+            const CostCalculator = require('../utils/costCalculator')
+            const fallbackCost = CostCalculator.calculateCost(usageObject, model)
+            if (fallbackCost && fallbackCost.costs && fallbackCost.costs.total > 0) {
+              logger.warn(
+                `⚠️ Using fallback cost calculation for ${model}: $${fallbackCost.costs.total}`
+              )
+              costInfo = {
+                totalCost: fallbackCost.costs.total,
+                inputCost: fallbackCost.costs.input,
+                outputCost: fallbackCost.costs.output,
+                cacheCreateCost: fallbackCost.costs.cacheWrite,
+                cacheReadCost: fallbackCost.costs.cacheRead,
+                ephemeral5mCost: 0,
+                ephemeral1hCost: 0,
+                costs: fallbackCost.costs
+              }
+            }
+          } catch (fallbackError) {
+            logger.error(`❌ Fallback cost calculation also failed:`, fallbackError)
           }
         }
-      } catch (pricingError) {
-        logger.error(`❌ Failed to calculate cost for model ${model}:`, pricingError)
-        logger.error(`   Usage object:`, JSON.stringify(usageObject))
-        // 使用 CostCalculator 作为后备
-        try {
-          const CostCalculator = require('../utils/costCalculator')
-          const fallbackCost = CostCalculator.calculateCost(usageObject, model)
-          if (fallbackCost && fallbackCost.costs && fallbackCost.costs.total > 0) {
-            logger.warn(
-              `⚠️ Using fallback cost calculation for ${model}: $${fallbackCost.costs.total}`
-            )
-            costInfo = {
-              totalCost: fallbackCost.costs.total,
-              ephemeral5mCost: 0,
-              ephemeral1hCost: 0
-            }
-          }
-        } catch (fallbackError) {
-          logger.error(`❌ Fallback cost calculation also failed:`, fallbackError)
+      }
+
+      // 统一成本字段，确保存在 costs 对象
+      const normalizedTotalCost = costInfo.totalCost ?? costInfo.costs?.total ?? costInfo.cost ?? 0
+      const normalizedInputCost = costInfo.inputCost ?? costInfo.costs?.input ?? 0
+      const normalizedOutputCost = costInfo.outputCost ?? costInfo.costs?.output ?? 0
+      const normalizedCacheCreateCost =
+        costInfo.cacheCreateCost ?? costInfo.costs?.cacheCreate ?? costInfo.costs?.cacheWrite ?? 0
+      const normalizedCacheReadCost = costInfo.cacheReadCost ?? costInfo.costs?.cacheRead ?? 0
+      const normalizedEphemeral5mCost = costInfo.ephemeral5mCost || 0
+      const normalizedEphemeral1hCost = costInfo.ephemeral1hCost || 0
+
+      costInfo = {
+        ...costInfo,
+        billingMode,
+        totalCost: normalizedTotalCost,
+        inputCost: normalizedInputCost,
+        outputCost: normalizedOutputCost,
+        cacheCreateCost: normalizedCacheCreateCost,
+        cacheReadCost: normalizedCacheReadCost,
+        ephemeral5mCost: normalizedEphemeral5mCost,
+        ephemeral1hCost: normalizedEphemeral1hCost,
+        costs: {
+          input: normalizedInputCost,
+          output: normalizedOutputCost,
+          cacheCreate: normalizedCacheCreateCost,
+          cacheWrite: normalizedCacheCreateCost,
+          cacheRead: normalizedCacheReadCost,
+          total: normalizedTotalCost,
+          ephemeral5m: normalizedEphemeral5mCost,
+          ephemeral1h: normalizedEphemeral1hCost
         }
       }
 
@@ -1144,6 +1140,14 @@ class ApiKeyService {
         ephemeral1hTokens = usageObject.cache_creation.ephemeral_1h_input_tokens || 0
       }
 
+      const isLongContextRequest =
+        costInfo.isLongContextRequest ||
+        (model &&
+          model.includes('[1m]') &&
+          inputTokens + cacheCreateTokens + cacheReadTokens > 200000)
+
+      costInfo.isLongContextRequest = isLongContextRequest
+
       // 记录API Key级别的使用统计 - 这个必须执行
       await redis.incrementTokenUsage(
         keyId,
@@ -1155,7 +1159,7 @@ class ApiKeyService {
         model,
         ephemeral5mTokens, // 传递5分钟缓存 tokens
         ephemeral1hTokens, // 传递1小时缓存 tokens
-        costInfo.isLongContextRequest || false // 传递 1M 上下文请求标记
+        isLongContextRequest // 传递 1M 上下文请求标记
       )
 
       // 记录费用统计
@@ -1189,11 +1193,10 @@ class ApiKeyService {
       }
 
       // 获取API Key数据以确定关联的账户
-      const keyData = await redis.getApiKey(keyId)
-      if (keyData && Object.keys(keyData).length > 0) {
+      if (apiKeyData && Object.keys(apiKeyData).length > 0) {
         // 更新最后使用时间
-        keyData.lastUsedAt = new Date().toISOString()
-        await redis.setApiKey(keyId, keyData)
+        apiKeyData.lastUsedAt = new Date().toISOString()
+        await redis.setApiKey(keyId, apiKeyData)
 
         // 记录账户级别的使用统计（只统计实际处理请求的账户）
         if (accountId) {
@@ -1205,7 +1208,7 @@ class ApiKeyService {
             cacheCreateTokens,
             cacheReadTokens,
             model,
-            costInfo.isLongContextRequest || false
+            isLongContextRequest
           )
           logger.database(
             `📊 Recorded account usage: ${accountId} - ${totalTokens} tokens (API Key: ${keyId})`
@@ -1238,7 +1241,9 @@ class ApiKeyService {
           ephemeral5m: costInfo.ephemeral5mCost || 0,
           ephemeral1h: costInfo.ephemeral1hCost || 0
         },
-        isLongContext: costInfo.isLongContextRequest || false
+        billingMode,
+        perRequestCost: billingMode === 'request' ? perRequestCost : undefined,
+        isLongContext: isLongContextRequest
       }
 
       await redis.addUsageRecord(keyId, usageRecord)
@@ -1269,8 +1274,8 @@ class ApiKeyService {
       // 🔔 发布计费事件到消息队列（异步非阻塞）
       this._publishBillingEvent({
         keyId,
-        keyName: keyData?.name,
-        userId: keyData?.userId,
+        keyName: apiKeyData?.name,
+        userId: apiKeyData?.userId,
         model,
         inputTokens,
         outputTokens,
@@ -1290,8 +1295,10 @@ class ApiKeyService {
         },
         accountId,
         accountType,
-        isLongContext: costInfo.isLongContextRequest || false,
-        requestTimestamp: usageRecord.timestamp
+        isLongContext: isLongContextRequest,
+        requestTimestamp: usageRecord.timestamp,
+        billingMode,
+        perRequestCost: billingMode === 'request' ? perRequestCost : undefined
       }).catch((err) => {
         // 发布失败不影响主流程，只记录错误
         logger.warn('⚠️ Failed to publish billing event:', err.message)
@@ -1527,6 +1534,8 @@ class ApiKeyService {
           userUsername: key.userUsername,
           createdBy: key.createdBy,
           droidAccountId: key.droidAccountId,
+          billingMode: key.billingMode || 'token',
+          perRequestCost: parseFloat(key.perRequestCost || 0),
           // Include deletion fields for deleted keys
           isDeleted: key.isDeleted,
           deletedAt: key.deletedAt,
