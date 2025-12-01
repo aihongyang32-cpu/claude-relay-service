@@ -221,12 +221,51 @@
                   </div>
                 </div>
               </div>
+          </div>
+        </div>
+
+        <!-- 扣费模式设置 -->
+        <div class="rounded-lg border border-purple-200 bg-purple-50 p-3 dark:border-purple-700 dark:bg-purple-900/20">
+          <div class="mb-2 flex items-center gap-2">
+            <div class="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded bg-purple-500">
+              <i class="fas fa-coins text-xs text-white" />
             </div>
+            <h4 class="text-sm font-semibold text-gray-800 dark:text-gray-200">扣费模式</h4>
           </div>
 
-          <div>
-            <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
-              >每日费用限制 (美元)</label
+          <div class="grid grid-cols-1 gap-2 lg:grid-cols-2">
+            <div>
+              <label class="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">计费方式</label>
+              <select
+                v-model="form.billingMode"
+                class="form-select w-full border-gray-300 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+              >
+                <option value="token">按 Token 计费</option>
+                <option value="request">按调用次数计费</option>
+              </select>
+              <p class="ml-1 mt-1 text-xs text-gray-500 dark:text-gray-400">
+                选择按调用次数计费时，将忽略 Token 数量，只按请求次数扣费
+              </p>
+            </div>
+
+            <div v-if="form.billingMode === 'request'">
+              <label class="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">单次费用 (美元)</label>
+              <input
+                v-model="form.perRequestCost"
+                class="form-input w-full border-gray-300 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                min="0"
+                placeholder="默认 1"
+                step="0.01"
+                type="number"
+              />
+              <p class="ml-1 mt-1 text-xs text-gray-500 dark:text-gray-400">每次请求扣除的费用额度</p>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+            >每日费用限制 (美元)</label
             >
             <div class="space-y-3">
               <div class="flex gap-2">
@@ -796,6 +835,8 @@ const form = reactive({
   rateLimitWindow: '',
   rateLimitRequests: '',
   rateLimitCost: '', // 新增：费用限制
+  billingMode: 'token',
+  perRequestCost: '1',
   concurrencyLimit: '',
   dailyCostLimit: '',
   totalCostLimit: '',
@@ -886,6 +927,14 @@ const updateApiKey = async () => {
     }
   }
 
+  if (form.billingMode === 'request') {
+    const cost = Number(form.perRequestCost)
+    if (isNaN(cost) || cost < 0) {
+      showToast('按次计费单价必须是非负数字', 'error')
+      return
+    }
+  }
+
   loading.value = true
 
   try {
@@ -905,6 +954,13 @@ const updateApiKey = async () => {
         form.rateLimitCost !== '' && form.rateLimitCost !== null
           ? parseFloat(form.rateLimitCost)
           : 0,
+      billingMode: form.billingMode,
+      perRequestCost:
+        form.billingMode === 'request'
+          ? form.perRequestCost !== '' && form.perRequestCost !== null
+            ? parseFloat(form.perRequestCost)
+            : 1
+          : undefined,
       concurrencyLimit:
         form.concurrencyLimit !== '' && form.concurrencyLimit !== null
           ? parseInt(form.concurrencyLimit)
@@ -1228,6 +1284,11 @@ onMounted(async () => {
   // 处理速率限制迁移：如果有tokenLimit且没有rateLimitCost，提示用户
   form.tokenLimit = props.apiKey.tokenLimit || ''
   form.rateLimitCost = props.apiKey.rateLimitCost || ''
+  form.billingMode = props.apiKey.billingMode || 'token'
+  form.perRequestCost =
+    props.apiKey.billingMode === 'request'
+      ? props.apiKey.perRequestCost?.toString() || '1'
+      : '1'
 
   // 如果有历史tokenLimit但没有rateLimitCost，提示用户需要重新设置
   if (props.apiKey.tokenLimit > 0 && !props.apiKey.rateLimitCost) {

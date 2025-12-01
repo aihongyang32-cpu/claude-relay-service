@@ -68,7 +68,9 @@ class BillingEventPublisher {
             cacheRead: eventData.costBreakdown?.cacheRead || 0,
             ephemeral5m: eventData.costBreakdown?.ephemeral5m || 0,
             ephemeral1h: eventData.costBreakdown?.ephemeral1h || 0
-          }
+          },
+          billingMode: eventData.billingMode || 'token',
+          perRequestCost: eventData.billingMode === 'request' ? eventData.perRequestCost || 0 : 0
         },
 
         // 账户信息
@@ -140,7 +142,17 @@ class BillingEventPublisher {
           },
           cost: {
             total: eventData.cost || 0,
-            currency: 'USD'
+            currency: 'USD',
+            breakdown: {
+              input: eventData.costBreakdown?.input || 0,
+              output: eventData.costBreakdown?.output || 0,
+              cacheCreate: eventData.costBreakdown?.cacheCreate || 0,
+              cacheRead: eventData.costBreakdown?.cacheRead || 0,
+              ephemeral5m: eventData.costBreakdown?.ephemeral5m || 0,
+              ephemeral1h: eventData.costBreakdown?.ephemeral1h || 0
+            },
+            billingMode: eventData.billingMode || 'token',
+            perRequestCost: eventData.billingMode === 'request' ? eventData.perRequestCost || 0 : 0
           }
         }
 

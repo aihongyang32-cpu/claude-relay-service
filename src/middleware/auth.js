@@ -466,7 +466,9 @@ const authenticateApiKey = async (req, res, next) => {
         currentCost, // 新增：当前费用
         rateLimitRequests,
         tokenLimit,
-        rateLimitCost // 新增：费用限制
+        rateLimitCost, // 新增：费用限制
+        billingMode: validation.keyData.billingMode || 'token',
+        perRequestCost: validation.keyData.perRequestCost || 0
       }
     }
 
@@ -594,6 +596,8 @@ const authenticateApiKey = async (req, res, next) => {
       dailyCost: validation.keyData.dailyCost,
       totalCostLimit: validation.keyData.totalCostLimit,
       totalCost: validation.keyData.totalCost,
+      billingMode: validation.keyData.billingMode || 'token',
+      perRequestCost: validation.keyData.perRequestCost || 0,
       usage: validation.keyData.usage
     }
     req.usage = validation.keyData.usage

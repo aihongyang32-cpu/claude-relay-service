@@ -23,6 +23,50 @@ class ClaudeRelayService {
     this.claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
   }
 
+  _parseExtInfo(extInfo) {
+    if (!extInfo) {
+      return null
+    }
+
+    if (typeof extInfo === 'object') {
+      return extInfo
+    }
+
+    if (typeof extInfo !== 'string') {
+      return null
+    }
+
+    try {
+      const parsed = JSON.parse(extInfo)
+      return parsed && typeof parsed === 'object' ? parsed : null
+    } catch (error) {
+      logger.warn('⚠️ 无法解析账户扩展信息，已忽略自定义上游配置：', error.message)
+      return null
+    }
+  }
+
+  _getAccountApiUrl(account) {
+    const extInfo = this._parseExtInfo(account?.extInfo)
+
+    if (extInfo?.upstream_type === 'relay' && typeof extInfo.relay_base_url === 'string') {
+      const relayBaseUrl = extInfo.relay_base_url.trim()
+      if (relayBaseUrl) {
+        try {
+          const parsed = new URL(relayBaseUrl)
+          return parsed.toString()
+        } catch (error) {
+          logger.warn(
+            `⚠️ 账户 ${account?.id || 'unknown'} 的中转上游地址无效，已回退官方：`,
+            relayBaseUrl,
+            error.message
+          )
+        }
+      }
+    }
+
+    return this.claudeApiUrl
+  }
+
   // 🔧 根据模型ID和客户端传递的 anthropic-beta 获取最终的 header
   // 规则：
   // 1. 如果客户端传递了 anthropic-beta，检查是否包含 oauth-2025-04-20
@@ -974,10 +1018,10 @@ class ClaudeRelayService {
     onRequest,
     requestOptions = {}
   ) {
-    const url = new URL(this.claudeApiUrl)
-
-    // 获取账户信息用于统一 User-Agent
+    // 获取账户信息用于统一 User-Agent 和自定义上游
     const account = await claudeAccountService.getAccount(accountId)
+    const apiUrl = this._getAccountApiUrl(account)
+    const url = new URL(apiUrl)
 
     // 获取统一的 User-Agent
     const unifiedUA = await this.captureAndGetUnifiedUserAgent(clientHeaders, account)
@@ -1342,8 +1386,10 @@ class ClaudeRelayService {
     requestPayload = extensionResult.body
     finalHeaders = extensionResult.headers
 
+    const apiUrl = this._getAccountApiUrl(account)
+
     return new Promise((resolve, reject) => {
-      const url = new URL(this.claudeApiUrl)
+      const url = new URL(apiUrl)
 
       const options = {
         hostname: url.hostname,

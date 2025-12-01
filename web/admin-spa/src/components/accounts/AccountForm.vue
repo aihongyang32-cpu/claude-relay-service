@@ -1611,6 +1611,49 @@
               </p>
             </div>
 
+            <div v-if="form.platform === 'claude'" class="mt-4 space-y-2">
+              <label class="block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                >上游类型</label
+              >
+              <div class="flex flex-col gap-3 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-800">
+                <label class="flex cursor-pointer items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                  <input
+                    v-model="form.claudeUpstreamType"
+                    class="text-indigo-600 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-700"
+                    name="claude-upstream"
+                    type="radio"
+                    value="official"
+                  />
+                  <span>官方 Anthropic 上游</span>
+                </label>
+                <label class="flex cursor-pointer items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                  <input
+                    v-model="form.claudeUpstreamType"
+                    class="text-indigo-600 focus:ring-indigo-500 dark:border-gray-600 dark:bg-gray-700"
+                    name="claude-upstream"
+                    type="radio"
+                    value="relay"
+                  />
+                  <span>自定义中转上游</span>
+                </label>
+                <div v-if="form.claudeUpstreamType === 'relay'" class="space-y-1">
+                  <input
+                    v-model="form.claudeRelayBaseUrl"
+                    :class="{ 'border-red-500 dark:border-red-400': errors.relayBaseUrl }"
+                    class="form-input w-full border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                    placeholder="https://your-relay.com/v1/messages"
+                    type="url"
+                  />
+                  <p v-if="errors.relayBaseUrl" class="text-xs text-red-500 dark:text-red-400">
+                    {{ errors.relayBaseUrl }}
+                  </p>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    设置兼容 Anthropic 的中转上游地址，例如自建 CRS 或其他中转网关。
+                  </p>
+                </div>
+              </div>
+            </div>
+
             <!-- Claude 5小时限制自动停止调度选项 -->
             <div v-if="form.platform === 'claude'" class="mt-4">
               <label class="flex items-start">
@@ -3713,6 +3756,8 @@ const form = ref({
   accountType: props.account?.accountType || 'shared',
   authenticationMethod: props.account?.authenticationMethod || '',
   subscriptionType: 'claude_max', // 默认为 Claude Max，兼容旧数据
+  claudeUpstreamType: props.account?.extInfo?.upstream_type || 'official',
+  claudeRelayBaseUrl: props.account?.extInfo?.relay_base_url || '',
   autoStopOnWarning: props.account?.autoStopOnWarning || false, // 5小时限制自动停止调度
   useUnifiedUserAgent: props.account?.useUnifiedUserAgent || false, // 使用统一Claude Code版本
   useUnifiedClientId: props.account?.useUnifiedClientId || false, // 使用统一的客户端标识
@@ -3924,7 +3969,8 @@ const errors = ref({
   secretAccessKey: '',
   region: '',
   azureEndpoint: '',
-  deploymentName: ''
+  deploymentName: '',
+  relayBaseUrl: ''
 })
 
 // 计算是否可以进入下一步
@@ -4218,6 +4264,31 @@ const handleOAuthSuccess = async (tokenInfo) => {
       proxy: proxyPayload
     }
 
+    if (props.account.platform === 'claude') {
+      const extInfoPayload = {}
+      const existingExtInfo = props.account.extInfo
+
+      if (existingExtInfo && typeof existingExtInfo === 'object') {
+        if (existingExtInfo.org_uuid) {
+          extInfoPayload.org_uuid = existingExtInfo.org_uuid
+        }
+        if (existingExtInfo.account_uuid) {
+          extInfoPayload.account_uuid = existingExtInfo.account_uuid
+        }
+      }
+
+      if (form.value.claudeUpstreamType === 'relay') {
+        extInfoPayload.upstream_type = 'relay'
+        extInfoPayload.relay_base_url = form.value.claudeRelayBaseUrl?.trim()
+      } else {
+        extInfoPayload.upstream_type = 'official'
+      }
+
+      if (Object.keys(extInfoPayload).length > 0) {
+        data.extInfo = extInfoPayload
+      }
+    }
+
     const currentPlatform = form.value.platform
 
     if (currentPlatform === 'claude') {
@@ -4245,6 +4316,13 @@ const handleOAuthSuccess = async (tokenInfo) => {
           if (accountUuid) {
             extInfoPayload.account_uuid = accountUuid
           }
+        }
+
+        if (form.value.claudeUpstreamType === 'relay') {
+          extInfoPayload.upstream_type = 'relay'
+          extInfoPayload.relay_base_url = form.value.claudeRelayBaseUrl?.trim()
+        } else {
+          extInfoPayload.upstream_type = 'official'
         }
 
         if (Object.keys(extInfoPayload).length > 0) {
@@ -4398,6 +4476,25 @@ const createAccount = async () => {
   if (!form.value.name || form.value.name.trim() === '') {
     errors.value.name = '请填写账户名称'
     hasError = true
+  }
+
+  if (form.value.platform === 'claude' && form.value.claudeUpstreamType === 'relay') {
+    const relayUrl = form.value.claudeRelayBaseUrl?.trim() || ''
+    if (!relayUrl) {
+      errors.value.relayBaseUrl = '请填写中转上游地址'
+      hasError = true
+    } else {
+      try {
+        // eslint-disable-next-line no-new
+        new URL(relayUrl)
+        errors.value.relayBaseUrl = ''
+      } catch (error) {
+        errors.value.relayBaseUrl = '中转上游地址格式不正确'
+        hasError = true
+      }
+    }
+  } else {
+    errors.value.relayBaseUrl = ''
   }
 
   // Claude Console 验证
@@ -4778,6 +4875,24 @@ const updateAccount = async () => {
   if (!form.value.name || form.value.name.trim() === '') {
     errors.value.name = '请填写账户名称'
     return
+  }
+
+  if (form.value.platform === 'claude' && form.value.claudeUpstreamType === 'relay') {
+    const relayUrl = form.value.claudeRelayBaseUrl?.trim() || ''
+    if (!relayUrl) {
+      errors.value.relayBaseUrl = '请填写中转上游地址'
+      return
+    }
+    try {
+      // eslint-disable-next-line no-new
+      new URL(relayUrl)
+      errors.value.relayBaseUrl = ''
+    } catch (error) {
+      errors.value.relayBaseUrl = '中转上游地址格式不正确'
+      return
+    }
+  } else {
+    errors.value.relayBaseUrl = ''
   }
 
   // Gemini API 的 baseUrl 验证（必须以 /models 结尾）

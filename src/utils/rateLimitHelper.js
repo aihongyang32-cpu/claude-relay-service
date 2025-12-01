@@ -23,12 +23,18 @@ async function updateRateLimitCounters(rateLimitInfo, usageSummary, model) {
   const cacheReadTokens = toNumber(usageSummary.cacheReadTokens)
 
   const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
+  const billingMode = usageSummary.billingMode || rateLimitInfo.billingMode || 'token'
+  const perRequestCost = toNumber(usageSummary.perRequestCost ?? rateLimitInfo.perRequestCost)
 
   if (totalTokens > 0 && rateLimitInfo.tokenCountKey) {
     await client.incrby(rateLimitInfo.tokenCountKey, Math.round(totalTokens))
   }
 
   let totalCost = 0
+
+  if (billingMode === 'request') {
+    totalCost = perRequestCost > 0 ? perRequestCost : 0
+  }
   const usagePayload = {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
@@ -36,26 +42,28 @@ async function updateRateLimitCounters(rateLimitInfo, usageSummary, model) {
     cache_read_input_tokens: cacheReadTokens
   }
 
-  try {
-    const costInfo = pricingService.calculateCost(usagePayload, model)
-    const { totalCost: calculatedCost } = costInfo || {}
-    if (typeof calculatedCost === 'number') {
-      totalCost = calculatedCost
-    }
-  } catch (error) {
-    // 忽略此处错误，后续使用备用计算
-    totalCost = 0
-  }
-
-  if (totalCost === 0) {
+  if (billingMode !== 'request') {
     try {
-      const fallback = CostCalculator.calculateCost(usagePayload, model)
-      const { costs } = fallback || {}
-      if (costs && typeof costs.total === 'number') {
-        totalCost = costs.total
+      const costInfo = pricingService.calculateCost(usagePayload, model)
+      const { totalCost: calculatedCost } = costInfo || {}
+      if (typeof calculatedCost === 'number') {
+        totalCost = calculatedCost
       }
     } catch (error) {
+      // 忽略此处错误，后续使用备用计算
       totalCost = 0
+    }
+
+    if (totalCost === 0) {
+      try {
+        const fallback = CostCalculator.calculateCost(usagePayload, model)
+        const { costs } = fallback || {}
+        if (costs && typeof costs.total === 'number') {
+          totalCost = costs.total
+        }
+      } catch (error) {
+        totalCost = 0
+      }
     }
   }
 
